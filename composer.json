@@ -6,7 +6,7 @@
     "keywords": ["lotse", "musterung", "oidc", "oauth2", "auth", "jwt", "jwks"],
     "require": {
         "php": ">=8.4",
-        "lotse/rigg": "^1.0",
+        "lotse/rigg": "^1.0 || ^2.0",
         "psr/cache": "^3.0",
         "psr/clock": "^1.0",
         "symfony/http-client-contracts": "^3.0",
