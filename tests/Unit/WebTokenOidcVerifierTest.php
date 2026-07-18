@@ -19,6 +19,7 @@ use Jose\Component\Signature\Algorithm\ES384;
 use Jose\Component\Signature\Algorithm\RS256;
 use Jose\Component\Signature\JWSBuilder;
 use Jose\Component\Signature\Serializer\CompactSerializer;
+use Lotse\Musterung\JwksProviderInterface;
 use Lotse\Musterung\StaticJwksProvider;
 use Lotse\Musterung\WebTokenOidcVerifier;
 use Lotse\Rigg\Auth\OidcVerificationException;
@@ -97,9 +98,19 @@ final class WebTokenOidcVerifierTest extends TestCase
         $this->assertRejectedWith('invalid_claims', $this->sign($this->ecPrivate, 'ES256', $claims));
     }
 
+    public function testRejectsNotYetValidToken(): void
+    {
+        $this->assertRejectedWith('invalid_claims', $this->sign($this->ecPrivate, 'ES256', $this->claims(['nbf' => $this->ts('+1 minute')])));
+    }
+
     public function testRejectsWrongAudience(): void
     {
         $this->assertRejectedWith('invalid_claims', $this->sign($this->ecPrivate, 'ES256', $this->claims(['aud' => 'some-other-service'])));
+    }
+
+    public function testRejectsMalformedAudienceArray(): void
+    {
+        $this->assertRejectedWith('invalid_claims', $this->sign($this->ecPrivate, 'ES256', $this->claims(['aud' => [self::AUDIENCE, 42]])));
     }
 
     public function testRejectsUnknownIssuer(): void
@@ -119,6 +130,30 @@ final class WebTokenOidcVerifierTest extends TestCase
         $foreign = JWKFactory::createECKey('P-256', ['kid' => 'ec-1', 'use' => 'sig', 'alg' => 'ES256']);
 
         $this->assertRejectedWith('invalid_signature', $this->sign($foreign, 'ES256', $this->claims()));
+    }
+
+    public function testRejectsWhenJwksCannotBeLoaded(): void
+    {
+        $unavailableJwks = new class implements JwksProviderInterface {
+            public function jwkSetFor(string $issuer): JWKSet
+            {
+                throw new \RuntimeException('Synthetic JWKS outage.');
+            }
+
+            public function refreshed(string $issuer): JWKSet
+            {
+                throw new \RuntimeException('Synthetic JWKS outage.');
+            }
+        };
+        $verifier = new WebTokenOidcVerifier($unavailableJwks, $this->clock, [self::ISSUER], [self::AUDIENCE]);
+
+        try {
+            $verifier->verify($this->sign($this->ecPrivate, 'ES256', $this->claims()));
+            self::fail('Erwartete OidcVerificationException bei nicht verfügbarer JWKS.');
+        } catch (OidcVerificationException $e) {
+            self::assertSame('jwks_unavailable', $e->reason);
+            self::assertInstanceOf(\RuntimeException::class, $e->getPrevious());
+        }
     }
 
     public function testRejectsMalformedToken(): void

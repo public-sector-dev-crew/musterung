@@ -13,6 +13,7 @@ use Jose\Component\Checker\ExpirationTimeChecker;
 use Jose\Component\Checker\HeaderCheckerManager;
 use Jose\Component\Checker\IssuedAtChecker;
 use Jose\Component\Checker\IssuerChecker;
+use Jose\Component\Checker\NotBeforeChecker;
 use Jose\Component\Core\AlgorithmManager;
 use Jose\Component\Signature\Algorithm\EdDSA;
 use Jose\Component\Signature\Algorithm\ES256;
@@ -32,7 +33,8 @@ use Psr\Clock\ClockInterface;
  *
  * 1. Nur `[ES256, ES384, EdDSA]` im *protected* Header (BSI TR-03116-4); `alg: none`/RS256 → Ablehnung.
  * 2. Signatur gegen die Issuer-JWKS; scheitert sie, wird die JWKS **einmal** frisch geladen (`kid`-Rotation).
- * 3. `iss` gegen die Allowlist, `exp` Pflicht + nicht abgelaufen, `iat` plausibel, Pflicht-Claims präsent.
+ * 3. `iss` gegen die Allowlist, `exp` Pflicht + nicht abgelaufen, vorhandenes `nbf` eingehalten,
+ *    `iat` plausibel, Pflicht-Claims präsent.
  * 4. `aud` gegen die konfigurierte Audience-Liste (string **oder** array-`aud`).
  *
  * Die JWT-Bibliothek ist hier gekapselt; nach außen liefert der Verifier den vendor-neutralen
@@ -81,6 +83,7 @@ final class WebTokenOidcVerifier implements OidcTokenVerifierInterface
         $this->claimChecker = new ClaimCheckerManager([
             new IssuedAtChecker($clock),
             new ExpirationTimeChecker($clock),
+            new NotBeforeChecker($clock),
             new IssuerChecker($allowedIssuers),
         ]);
         $this->allowedIssuers = $allowedIssuers;
@@ -191,11 +194,11 @@ final class WebTokenOidcVerifier implements OidcTokenVerifierInterface
 
     private function verifySignatureOrThrow(JWS $jws, string $issuer, ?string $kid): void
     {
-        $jwkset = $this->jwks->jwkSetFor($issuer);
+        $jwkset = $this->loadJwkSet($issuer, false);
 
         // `kid`-Rotation: fehlt der referenzierte Schlüssel im Satz, einmal frisch laden.
         if (null !== $kid && null === $jwkset->selectKey('sig', null, ['kid' => $kid])) {
-            $jwkset = $this->jwks->refreshed($issuer);
+            $jwkset = $this->loadJwkSet($issuer, true);
             if (null === $jwkset->selectKey('sig', null, ['kid' => $kid])) {
                 throw OidcVerificationException::unknownSigningKey();
             }
@@ -206,11 +209,20 @@ final class WebTokenOidcVerifier implements OidcTokenVerifierInterface
         }
 
         // Fehlschlag evtl. wegen veralteten Caches → einmal frisch laden und erneut prüfen.
-        if ($this->jwsVerifier->verifyWithKeySet($jws, $this->jwks->refreshed($issuer), 0)) {
+        if ($this->jwsVerifier->verifyWithKeySet($jws, $this->loadJwkSet($issuer, true), 0)) {
             return;
         }
 
         throw OidcVerificationException::invalidSignature();
+    }
+
+    private function loadJwkSet(string $issuer, bool $refresh): \Jose\Component\Core\JWKSet
+    {
+        try {
+            return $refresh ? $this->jwks->refreshed($issuer) : $this->jwks->jwkSetFor($issuer);
+        } catch (\Throwable $e) {
+            throw OidcVerificationException::jwksUnavailable($e);
+        }
     }
 
     /**
@@ -219,10 +231,22 @@ final class WebTokenOidcVerifier implements OidcTokenVerifierInterface
     private function matchAudience(array $claims): string
     {
         $aud = $claims['aud'] ?? null;
-        $tokenAudiences = \is_string($aud) ? [$aud] : (\is_array($aud) ? $aud : []);
+        if (\is_string($aud)) {
+            $tokenAudiences = [$aud];
+        } elseif (\is_array($aud)) {
+            $tokenAudiences = [];
+            foreach ($aud as $candidate) {
+                if (!\is_string($candidate) || '' === $candidate) {
+                    throw OidcVerificationException::invalidClaims();
+                }
+                $tokenAudiences[] = $candidate;
+            }
+        } else {
+            throw OidcVerificationException::invalidClaims();
+        }
 
         foreach ($tokenAudiences as $candidate) {
-            if (\is_string($candidate) && \in_array($candidate, $this->allowedAudiences, true)) {
+            if (\in_array($candidate, $this->allowedAudiences, true)) {
                 return $candidate;
             }
         }
